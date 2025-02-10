@@ -1,146 +1,220 @@
-#!/usr/bin/python3
-# File name   : setup.py
-# Author      : Adeept
-# Date        : 2020/3/14
+#!/bin/bash
+# Adeept Rasptank Pro Robot Setup Script
+#
+# This script installs and configures system and Python packages for the robot,
+# sets up I²C/SPI and GPIO, configures firmware settings (keeping audio enabled for TTS),
+# and creates a startup script.
+#
+# The script uses individual sudo calls rather than requiring the entire script
+# to run as root. It also includes error trapping to aid in debugging.
+#
+# Author: Alexander Gomez (2025-02-10)
 
-import os
-import time
+# ------------------------------------------------------------------------------
+# Debug / Error Handling Setup
+# ------------------------------------------------------------------------------
+# Exit on any unhandled error and print the line number and command that failed.
+set -euo pipefail
+trap 'echo "Error occurred at line ${LINENO}: $(sed -n "${LINENO}p" "$0")" >&2' ERR
 
-curpath = os.path.realpath(__file__)
-thisPath = "/" + os.path.dirname(curpath)
+# Define a helper function to run commands with a log message.
+run_cmd() {
+    echo ">> Running: $*"
+    "$@"
+    local status=$?
+    if [ $status -ne 0 ]; then
+         echo "Error: Command failed: $*" >&2
+         exit $status
+    fi
+}
 
-def replace_num(file,initial,new_num):  
-    newline=""
-    str_num=str(new_num)
-    with open(file,"r") as f:
-        for line in f.readlines():
-            if(line.find(initial) == 0):
-                line = (str_num+'\n')
-            newline += line
-    with open(file,"w") as f:
-        f.writelines(newline)
+# Get the home directory of the non-root user running the script.
+USER_HOME=$(eval echo "~$USER")
+STARTUP_SCRIPT="$USER_HOME/startup.sh"
 
-for x in range(1,4):
-	if os.system("sudo apt-get update") == 0:
-		break
+# ------------------------------------------------------------------------------
+# 1. Update and Upgrade the System
+# ------------------------------------------------------------------------------
+echo "Updating package lists..."
+for i in {1..3}; do
+    if sudo apt update; then
+         break
+    else
+         echo "Attempt $i: apt update failed. Retrying in 2 seconds..."
+         sleep 2
+    fi
+done
 
-os.system("sudo apt-get purge -y wolfram-engine")
-os.system("sudo apt-get purge -y libreoffice*")
-os.system("sudo apt-get -y clean")
-os.system("sudo apt-get -y autoremove")
+echo "Upgrading installed packages..."
+run_cmd sudo apt upgrade -y
 
-# for x in range(1,4):
-# 	if os.system("sudo apt-get -y upgrade") == 0:
-# 		break
+# ------------------------------------------------------------------------------
+# 2. Upgrade pip for Python3
+# ------------------------------------------------------------------------------
+echo "Upgrading pip..."
+for i in {1..3}; do
+    if sudo -H pip3 install --upgrade pip; then
+         break
+    else
+         echo "Attempt $i: pip upgrade failed. Retrying in 2 seconds..."
+         sleep 2
+    fi
+done
 
-for x in range(1,4):
-	if os.system("sudo pip3 install -U pip") == 0:
-		break
+# ------------------------------------------------------------------------------
+# 3. Install Development Tools and System Libraries
+# ------------------------------------------------------------------------------
+echo "Installing development packages and libraries..."
+run_cmd sudo apt install -y python3-dev python3-pip python3-venv \
+    libfreetype6-dev libjpeg-dev build-essential
 
-for x in range(1,4):
-	if os.system("sudo apt-get install -y python-dev python-pip libfreetype6-dev libjpeg-dev build-essential") == 0:
-		break
+# ------------------------------------------------------------------------------
+# 4. Install Python Packages via apt
+# ------------------------------------------------------------------------------
+echo "Installing Python packages via apt..."
+run_cmd sudo apt install -y \
+    python3-flask \
+    python3-rpi-ws281x \
+    python3-flask-cors \
+    python3-websockets \
+    python3-numpy \
+    python3-opencv \
+    python3-smbus \
+    python3-luma.oled
 
-for x in range(1,4):
-	if os.system("sudo -H pip3 install --upgrade luma.oled") == 0:
-		break
+# ------------------------------------------------------------------------------
+# 5. Install Additional Python Packages Using pip
+# ------------------------------------------------------------------------------
+echo "Installing additional Python packages via pip..."
+run_cmd sudo -H pip3 install --break-system-packages \
+    adafruit-pca9685 \
+    mpu6050-raspberrypi \
+    RPi.GPIO \
+    adafruit-blinka \
+    adafruit-circuitpython-pca9685 \
+    imutils
 
-for x in range(1,4):
-	if os.system("sudo apt-get install -y i2c-tools") == 0:
-		break
+# ------------------------------------------------------------------------------
+# 6. Install Additional System Packages
+# ------------------------------------------------------------------------------
+echo "Installing additional system packages..."
+run_cmd sudo apt install -y \
+    i2c-tools \
+    ffmpeg \
+    v4l-utils \
+    libcamera-tools \
+    libcamera-v4l2 \
+    libttspico-utils
 
-for x in range(1,4):
-	if os.system("sudo apt-get install -y python3-opencv") == 0:
-		break
+# ------------------------------------------------------------------------------
+# 7. Enable and Start SSH Service
+# ------------------------------------------------------------------------------
+echo "Enabling and starting SSH service..."
+run_cmd sudo systemctl enable ssh
+run_cmd sudo systemctl start ssh
 
-for x in range(1,4):
-	if os.system("sudo pip3 install adafruit-pca9685") == 0:
-		break
+# ------------------------------------------------------------------------------
+# 8. Set Up I²C
+# ------------------------------------------------------------------------------
+echo "Configuring I²C..."
+run_cmd sudo modprobe i2c-dev
+if ! grep -q "^i2c-dev" /etc/modules; then
+    echo "i2c-dev" | sudo tee -a /etc/modules
+fi
 
-for x in range(1,4):
-	if os.system("sudo pip3 install rpi_ws281x") == 0:
-		break
+# ------------------------------------------------------------------------------
+# 9. Set Up GPIO Permissions
+# ------------------------------------------------------------------------------
+echo "Configuring GPIO permissions..."
+# Add the current (non-root) user to the gpio group.
+run_cmd sudo adduser "$USER" gpio
+# Adjust permissions for /dev/gpiomem if it exists.
+if [ -e /dev/gpiomem ]; then
+    sudo chown root:gpio /dev/gpiomem || true
+    sudo chmod g+rw /dev/gpiomem || true
+fi
 
-for x in range(1,4):
-	if os.system("sudo apt-get install -y python3-smbus") == 0:
-		break
+# ------------------------------------------------------------------------------
+# 10. Clone the Adeept_RaspTankPro Repository
+# ------------------------------------------------------------------------------
+if [ ! -d "$USER_HOME/Adeept_RaspTankPro" ]; then
+    echo "Cloning Adeept_RaspTankPro repository into $USER_HOME..."
+    run_cmd git clone https://github.com/adeept/Adeept_RaspTankPro.git "$USER_HOME/Adeept_RaspTankPro"
+fi
 
-for x in range(1,4):
-	if os.system("sudo pip3 install mpu6050-raspberrypi") == 0:
-		break
+# ------------------------------------------------------------------------------
+# 11. (Optional) Set Up Wi‑Fi Hotspot Tools (create_ap)
+# ------------------------------------------------------------------------------
+if ! command -v create_ap >/dev/null 2>&1; then
+    echo "Installing create_ap for Wi‑Fi hotspot functionality..."
+    run_cmd git clone https://github.com/oblique/create_ap /tmp/create_ap
+    (cd /tmp/create_ap && run_cmd sudo make install)
+fi
 
-for x in range(1,4):
-	if os.system("sudo pip3 install flask") == 0:
-		break
+# ------------------------------------------------------------------------------
+# 12. Configure Firmware Settings (config.txt)
+# ------------------------------------------------------------------------------
+echo "Configuring firmware settings..."
+CONFIG_FILE=""
+if [ -f /boot/firmware/config.txt ]; then
+    CONFIG_FILE="/boot/firmware/config.txt"
+elif [ -f /boot/config.txt ]; then
+    CONFIG_FILE="/boot/config.txt"
+fi
 
-for x in range(1,4):
-	if os.system("sudo pip3 install flask") == 0:
-		break
+if [ -n "$CONFIG_FILE" ]; then
+    echo "Using config file: $CONFIG_FILE"
+    # Enable I²C if not already enabled.
+    if ! grep -q "^dtparam=i2c_arm=on" "$CONFIG_FILE"; then
+        echo "dtparam=i2c_arm=on" | sudo tee -a "$CONFIG_FILE"
+    fi
+    # Enable SPI if not already enabled.
+    if ! grep -q "^dtparam=spi=on" "$CONFIG_FILE"; then
+        echo "dtparam=spi=on" | sudo tee -a "$CONFIG_FILE"
+    fi
+    # Enable camera support.
+    if ! grep -q "^start_x=1" "$CONFIG_FILE"; then
+        echo "start_x=1" | sudo tee -a "$CONFIG_FILE"
+    fi
+    # **Keep Audio Enabled** for text-to-speech.
+    if ! grep -q "^dtparam=audio=on" "$CONFIG_FILE"; then
+        echo "dtparam=audio=on" | sudo tee -a "$CONFIG_FILE"
+    fi
+else
+    echo "Warning: No config.txt found in /boot/firmware or /boot. Skipping firmware configuration."
+fi
 
-for x in range(1,4):
-	if os.system("sudo pip3 install flask_cors") == 0:
-		break
+# ------------------------------------------------------------------------------
+# 13. Create a Startup Script for Robot Control
+# ------------------------------------------------------------------------------
+echo "Creating startup script at $STARTUP_SCRIPT..."
+cat <<EOF > "$STARTUP_SCRIPT"
+#!/bin/bash
+# Startup script for Adeept Rasptank Pro robot
+# Uncomment one of the following commands to choose your control method
 
-for x in range(1,4):
-	if os.system("sudo pip3 install websockets") == 0:
-		break
+# Option 1: Launch the web server for remote control
+sudo python3 \$HOME/Adeept_RaspTankPro/server/webServer.py
 
-try:
-	replace_num("/boot/config.txt",'#dtparam=i2c_arm=on','dtparam=i2c_arm=on\nstart_x=1\n')
-except:
-	print('try again')
+# Option 2: Launch the main server
+# sudo python3 \$HOME/Adeept_RaspTankPro/server/server.py
+EOF
+run_cmd chmod +x "$STARTUP_SCRIPT"
 
+# Optionally, add the startup script to /etc/rc.local if that file exists.
+if [ -f /etc/rc.local ]; then
+    if ! grep -q "$STARTUP_SCRIPT" /etc/rc.local; then
+        echo "Adding startup script to /etc/rc.local..."
+        sudo sed -i '/exit 0/d' /etc/rc.local
+        echo "$STARTUP_SCRIPT &" | sudo tee -a /etc/rc.local
+        echo "exit 0" | sudo tee -a /etc/rc.local
+    fi
+fi
 
-for x in range(1,4):
-	if os.system("sudo pip3 install numpy") == 0:
-		break
+# ------------------------------------------------------------------------------
+# 14. Final Message
+# ------------------------------------------------------------------------------
+echo "Adeept Rasptank Pro Setup completed successfully!"
+echo "Please review the output for any errors."
+echo "When ready, you can reboot your system (sudo reboot) to apply all changes."
 
-for x in range(1,4):
-	if os.system("sudo apt-get -y install libqtgui4 libhdf5-dev libhdf5-serial-dev libatlas-base-dev libjasper-dev libqt4-test") == 0:
-		break
-
-for x in range(1,4):
-	if os.system("sudo pip3 install imutils zmq pybase64 psutil") == 0:   ####
-		break
-
-for x in range(1,4):
-	if os.system("sudo git clone https://github.com/oblique/create_ap") == 0:
-		break
-
-try:
-	os.system("cd " + thisPath + "/create_ap && sudo make install")
-except:
-	pass
-
-try:
-	os.system("cd //home/pi/create_ap && sudo make install")
-except:
-	pass
-
-for x in range(1,4):
-	if os.system("sudo apt-get install -y util-linux procps hostapd iproute2 iw haveged dnsmasq") == 0:
-		break
-
-try:
-	os.system('sudo touch //home/pi/startup.sh')
-	with open("//home/pi/startup.sh",'w') as file_to_write:
-		#you can choose how to control the robot
-		file_to_write.write("#!/bin/sh\nsudo python3 " + thisPath + "/server/webServer.py")
-		# file_to_write.write("#!/bin/sh\nsudo python3 " + thisPath + "/server/server.py")
-except:
-	pass
-
-os.system('sudo chmod 777 //home/pi/startup.sh')
-
-replace_num('/etc/rc.local','fi','fi\n//home/pi/startup.sh start')
-
-try: #fix conflict with onboard Raspberry Pi audio
-	os.system('sudo touch /etc/modprobe.d/snd-blacklist.conf')
-	with open("/etc/modprobe.d/snd-blacklist.conf",'w') as file_to_write:
-		file_to_write.write("blacklist snd_bcm2835")
-except:
-	pass
-
-print('The program in Raspberry Pi has been installed, disconnected and restarted. \nYou can now power off the Raspberry Pi to install the camera and driver board (Robot HAT). \nAfter turning on again, the Raspberry Pi will automatically run the program to set the servos port signal to turn the servos to the middle position, which is convenient for mechanical assembly.')
-print('restarting...')
-os.system("sudo reboot")
